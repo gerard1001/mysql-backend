@@ -37,7 +37,10 @@ const ISO_DATETIME_RE =
 const mkVal = (v: any): any => {
   if (typeof v === "number" && Number.isNaN(v)) return null;
   if (Buffer.isBuffer(v)) return v;
-  if (v?.constructor?.name === "PlainDate" && typeof v.toISOString === "function")
+  if (
+    v?.constructor?.name === "PlainDate" &&
+    typeof v.toISOString === "function"
+  )
     return v.toISOString();
   if (reprAsJson(v)) return JSON.stringify(v);
   if (typeof v === "string" && ISO_DATETIME_RE.test(v)) {
@@ -145,11 +148,10 @@ export const mysqlPlaceHolderStack = (): SqlDialect => {
     textCastSuffix() {
       return "";
     },
-    // MySQL's random function is RAND(); postgres/sqlite use RANDOM().
-    randomOrderExpr() {
-      return "RAND()";
-    },
   };
+  // MySQL's random function is RAND(); postgres/sqlite use RANDOM().
+  (self as SqlDialect & { randomOrderExpr?: () => string }).randomOrderExpr =
+    () => "RAND()";
   return self;
 };
 
@@ -638,7 +640,8 @@ const keyColumnExprs = async (
     `SHOW COLUMNS FROM "${getTenantSchema()}"."${sqlsanitize(table_name)}"`,
   );
   const typeOf: Record<string, string> = {};
-  for (const r of rows) typeOf[r.Field || r.field] = (r.Type || r.type || "").toLowerCase();
+  for (const r of rows)
+    typeOf[r.Field || r.field] = (r.Type || r.type || "").toLowerCase();
   const strLen = (t: string): number | null => {
     if (/text|blob/.test(t)) return Infinity;
     const m = t.match(/^(?:var)?char\((\d+)\)/);
@@ -1082,7 +1085,9 @@ export const parseUniqueConstraintError = (
   msg: string,
   tableName: string,
 ): string => {
-  const m = msg.match(/duplicate entry .* for key '(?:[^'.]*\.)?(.*?)_unique'/i);
+  const m = msg.match(
+    /duplicate entry .* for key '(?:[^'.]*\.)?(.*?)_unique'/i,
+  );
   if (!m) return "";
   // constraints are named "<table>_<field1>_<field2>_unique"
   return m[1].startsWith(`${tableName}_`)
