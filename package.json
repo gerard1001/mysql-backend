@@ -4,6 +4,8 @@
   "description": "MySQL database backend for Saltcorn, open-source no-code platform",
   "homepage": "https://saltcorn.com",
   "scripts": {
+    "build": "npm run clean && npm run tsc",
+    "prepack": "npm run build",
     "test": "cd dist && node --test",
     "tsc": "tsc -p tsconfig.json",
     "clean": "rm -rf ./dist/*"
@@ -12,6 +14,7 @@
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
     ".": "./dist/index.js",
     "./*": "./dist/*.js"
@@ -25,7 +28,8 @@
   },
   "files": [
     "dist/**/*",
-    "!dist/tsconfig.ref.tsbuildinfo"
+    "!dist/*.tsbuildinfo",
+    "!dist/**/*.tsbuildinfo"
   ],
   "dependencies": {
     "csv-parse": "^7.0.1",
