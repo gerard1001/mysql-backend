@@ -1,6 +1,6 @@
 {
   "name": "@saltcorn/mysql-backend",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "MySQL database backend for Saltcorn, open-source no-code platform",
   "homepage": "https://saltcorn.com",
   "scripts": {
