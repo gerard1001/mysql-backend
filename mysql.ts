@@ -1038,15 +1038,18 @@ export const sqlDialectFactory = (initCount?: number) =>
   mysqlPlaceHolderStack();
 
 export const driverName = "mysql";
+export const sql_backend_display_name = "MySQL";
 export const array_agg_sql_fn = "JSON_ARRAYAGG";
 export const serial_pk_sql_type = "INT AUTO_INCREMENT";
 export const json_sql_type = "JSON";
 export const indexable_text_sql_type = "VARCHAR(255)";
+export const timestamp_sql_type = "datetime";
+export const millis_timestamp_sql_type = "datetime(3)";
 // MySQL has no search_path, but query() below maps core's `SET search_path`
 // onto `USE <db>`, which scopes unqualified migration DDL the same way.
 export const supports_search_path = true;
 
-// --- Backend capability flags (see DbExportsType in @saltcorn/db-common) ---
+// Backend capability flags (see DbExportsType in @saltcorn/db-common):
 // Tenants map to one MySQL database each, and every query here is
 // "schema"."table"-qualified, so schema support is on (as for postgres).
 export const supports_multiple_schemas = true;
@@ -1068,6 +1071,224 @@ export const supports_database_views = true;
 export const supports_table_discovery = true;
 // getExpressSessionStore below honours pruneInterval via clearExpired.
 export const supports_session_pruning = true;
+// JSON_ARRAYAGG has no in-aggregate ORDER BY.
+export const supports_agg_order_by = false;
+// mysql2 returns count/sum/avg as JS numbers; core stringifies to match the
+// string representation postgres/sqlite hand back.
+export const coerce_numeric_aggregates_to_string = true;
+// mysql2 uses positional `?` placeholders (like sqlite), not numbered `$n`.
+export const uses_positional_placeholders = true;
+// day-only DATE columns come back needing coercion into a Date/PlainDate.
+export const coerce_read_dates = true;
+
+// SQL-expression builders (see DbExportsType in @saltcorn/db-common)
+export const epochToTimestampSql = (param: string): string =>
+  `FROM_UNIXTIME(${param})`;
+// MySQL DATETIME(3) already holds millisecond resolution; nothing to truncate.
+export const truncateMillisSql = (expr: string): string => expr;
+export const castExprToTextSql = (expr: string): string =>
+  `CAST(${expr} AS CHAR)`;
+// mysql2 infers the column type for `?` placeholders, so bind params need no
+// explicit cast (unlike Postgres's `$n::text`).
+export const castBindParamSql = (
+  param: string,
+  _sqlType: "text" | "jsonb",
+): string => param;
+
+// history-trim SQL fragments (see DbExportsType in @saltcorn/db-common)
+export const timeDiffWithinSql = (
+  startExpr: string,
+  endExpr: string,
+  seconds: number,
+): string =>
+  `TIMESTAMPDIFF(MICROSECOND, ${startExpr}, ${endExpr}) <= ${Math.round(
+    seconds * 1e6,
+  )}`;
+// `<=>` is MySQL's null-safe equality; negating it gives "is distinct from".
+export const isDistinctFromSql = (a: string, b: string): string =>
+  `NOT (${a} <=> ${b})`;
+// MySQL forbids referencing a DELETE target table in a subquery of the WHERE
+// clause ("can't specify target table for update in FROM clause"); wrapping it
+// in a derived table materialises it and satisfies the rule.
+export const wrapDeleteSubselect = (subquery: string): string =>
+  `select * from (${subquery}) as _d`;
+
+// column DDL (see DbExportsType in @saltcorn/db-common):
+// MySQL cannot index/key a TEXT column, so text pk/fk columns must become a
+// length-bounded type (indexable_text_sql_type).
+export const text_requires_length_for_index = true;
+export const setColumnNullabilitySql = (
+  qTable: string,
+  qCol: string,
+  sqlType: string,
+  notNull: boolean,
+): string =>
+  `alter table ${qTable} modify column ${qCol} ${sqlType} ${
+    notNull ? "not null" : "null"
+  };`;
+// MySQL has no ALTER COLUMN ... TYPE / USING; MODIFY COLUMN restates the type.
+export const alterColumnTypeSql = (
+  qTable: string,
+  qCol: string,
+  newType: string,
+  _using: string,
+  def: string,
+): string => `alter table ${qTable} modify column ${qCol} ${newType} ${def};`;
+export const changePkColumnTypeStatements = (
+  qTable: string,
+  qCol: string,
+  newType: string,
+  def: string,
+  wasAlreadyPk: boolean,
+): string[] =>
+  wasAlreadyPk
+    ? [`ALTER TABLE ${qTable} modify column ${qCol} ${newType} ${def};`]
+    : [
+        `ALTER TABLE ${qTable} drop column ${qCol};`,
+        `ALTER TABLE ${qTable} add column ${qCol} ${newType} primary key ${def};`,
+      ];
+
+// foreign-key DDL (see DbExportsType in @saltcorn/db-common):
+// MySQL declares FKs via a separate ADD CONSTRAINT after the column exists (not
+// inline in the column type), has no DEFERRABLE, and must drop a column's FK
+// before the column itself can be dropped.
+export const inline_fk_in_column_type = false;
+export const fk_must_be_dropped_before_column = true;
+export const fk_deferrable_clause = "";
+export const dropForeignKeyIfExists = async (
+  qTable: string,
+  conName: string,
+): Promise<void> => {
+  try {
+    await query(`ALTER TABLE ${qTable} drop foreign key "${conName}"`);
+  } catch (e: any) {
+    if (e?.code !== "ER_CANT_DROP_FIELD_OR_KEY") throw e;
+  }
+};
+export const replaceForeignKey = async (params: {
+  qTable: string;
+  oldConName: string;
+  newConName: string;
+  colName: string;
+  qRefTable: string;
+  refCol: string;
+  onDelete: string;
+}): Promise<void> => {
+  const {
+    qTable,
+    oldConName,
+    newConName,
+    colName,
+    qRefTable,
+    refCol,
+    onDelete,
+  } = params;
+  await query(`ALTER TABLE ${qTable} drop foreign key "${oldConName}"`);
+  await query(
+    `ALTER TABLE ${qTable} add constraint "${newConName}" foreign key ("${colName}") references ${qRefTable}("${refCol}")${onDelete}`,
+  );
+};
+export const addColumnWithDefault = async (params: {
+  qTable: string;
+  colName: string;
+  sqlType: string;
+  bareType: string;
+  required: boolean;
+  defaultValue: any;
+}): Promise<void> => {
+  const { qTable, colName, sqlType, required, defaultValue } = params;
+  const defVal =
+    typeof defaultValue === "object" && defaultValue !== null
+      ? JSON.stringify(defaultValue)
+      : defaultValue;
+  await query(
+    `alter table ${qTable} add column "${sqlsanitize(colName)}" ${sqlType} ${
+      required ? "not null" : ""
+    } default (?)`,
+    [defVal],
+  );
+};
+export const isDuplicateForeignKeyError = (e: any): boolean =>
+  e?.code === "ER_FK_DUP_NAME";
+
+// misc dialect-specific SQL / behaviour (see DbExportsType)
+export const jsonMergeExpr = (colExpr: string, param: string): string =>
+  `JSON_MERGE_PATCH(coalesce(${colExpr}, CAST('{}' AS JSON)), CAST(${param} AS JSON))`;
+// mysql2 has no array-parameter binding; IN-lists expand to positional `?`s.
+export const supports_array_param_in = false;
+export const deleteSessionsForUser = async (
+  userId: string,
+  tenant: string,
+): Promise<void> => {
+  const connectObj = getConnectObject!();
+  const sessionDb = connectObj.database || connectObj.default_schema;
+  try {
+    await query(
+      `delete from "${sessionDb}"."_sc_session"
+          where JSON_UNQUOTE(JSON_EXTRACT(sess, '$.passport.user.id')) = $1
+          and JSON_UNQUOTE(JSON_EXTRACT(sess, '$.passport.user.tenant')) = $2`,
+      [userId, tenant],
+    );
+  } catch (e: any) {
+    // the session table only exists once a server session store has run
+    if (e?.code !== "ER_NO_SUCH_TABLE") throw e;
+  }
+};
+export const deleteSessionsForTenant = async (
+  tenant: string,
+): Promise<void> => {
+  const connectObj = getConnectObject!();
+  const sessionDb = connectObj.database || connectObj.default_schema;
+  try {
+    await query(
+      `delete from "${sessionDb}"."_sc_session"
+            where JSON_UNQUOTE(JSON_EXTRACT(sess, '$.passport.user.tenant')) = $1`,
+      [tenant],
+    );
+  } catch (e: any) {
+    if (e?.code !== "ER_NO_SUCH_TABLE") throw e;
+  }
+};
+export const dropCheckConstraintIfExists = async (
+  qTable: string,
+  conName: string,
+): Promise<void> => {
+  try {
+    await query(`alter table ${qTable} drop check "${conName}";`);
+  } catch (e: any) {
+    if (e?.code !== "ER_CHECK_CONSTRAINT_NOT_FOUND") throw e;
+  }
+};
+export const migration_sql_dialect = "sql_mysql";
+export const migration_translates_from_pg = true;
+export const discovery_keys_uppercase = true;
+export const discovery_columns_order_by = " order by ordinal_position";
+export const discovery_pk_sql = `SELECT k.column_name, c.column_default, c.extra
+           FROM information_schema.key_column_usage k
+           JOIN information_schema.columns c
+             ON c.table_schema = k.table_schema
+            AND c.table_name = k.table_name
+            AND c.column_name = k.column_name
+           WHERE k.constraint_name = 'PRIMARY'
+             AND k.table_schema = $1 AND k.table_name = $2;`;
+export const discovery_fk_sql = `SELECT
+             table_schema,
+             constraint_name,
+             table_name,
+             column_name,
+             referenced_table_schema AS foreign_table_schema,
+             referenced_table_name AS foreign_table_name,
+             referenced_column_name AS foreign_column_name
+           FROM information_schema.key_column_usage
+           WHERE referenced_table_name IS NOT NULL
+             AND table_schema = $1 AND table_name = $2;`;
+export const dropPrimaryKey = async (
+  schemaPrefix: string,
+  tableName: string,
+  _tenantSchema: string,
+): Promise<void> => {
+  await query(`alter table ${schemaPrefix}"${tableName}" drop primary key`);
+};
 
 // Defer FK checks for the remainder of the current transaction. MySQL has no
 // transaction-scoped equivalent of postgres's SET CONSTRAINTS ALL DEFERRED;
